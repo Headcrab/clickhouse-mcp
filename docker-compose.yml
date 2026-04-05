@@ -1,21 +1,47 @@
 services:
+  clickhouse:
+    image: clickhouse/clickhouse-server:24.3
+    container_name: clickhouse
+    ports:
+      - "${CLICKHOUSE_PORT:-9000}:9000"
+      - "${CLICKHOUSE_HTTP_PORT:-8123}:8123"
+    environment:
+      CLICKHOUSE_DB: ${CLICKHOUSE_DB:-default}
+    healthcheck:
+      test: ["CMD-SHELL", "clickhouse-client --query 'SELECT 1'"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 15s
+
   clickhouse-mcp:
     build:
       context: .
       dockerfile: Dockerfile
     image: clickhouse-mcp:latest
     container_name: clickhouse-mcp
+    depends_on:
+      clickhouse:
+        condition: service_healthy
     ports:
-      - "${PORT:-8082}:8082"
+      - "${PORT:-8082}:${PORT:-8082}"
     environment:
-      - PORT=${PORT:-8082}
-      - CLICKHOUSE_URL=${CLICKHOUSE_URL:-localhost:9000/default}
-      - CLICKHOUSE_USER=${CLICKHOUSE_USER:-default}
-      - CLICKHOUSE_PASSWORD=${CLICKHOUSE_PASSWORD:-}
-      - CLICKHOUSE_DB=${CLICKHOUSE_DB:-}
-      - CLICKHOUSE_SECURE=${CLICKHOUSE_SECURE:-false}
+      CLICKHOUSE_MCP_TRANSPORT: ${CLICKHOUSE_MCP_TRANSPORT:-sse}
+      CLICKHOUSE_MCP_PORT: ${PORT:-8082}
+      CLICKHOUSE_MCP_PUBLIC_BASE_URL: ${CLICKHOUSE_MCP_PUBLIC_BASE_URL:-http://localhost:${PORT:-8082}}
+      CLICKHOUSE_MCP_URL: ${CLICKHOUSE_MCP_URL:-clickhouse:9000/default}
+      CLICKHOUSE_MCP_USER: ${CLICKHOUSE_MCP_USER:-default}
+      CLICKHOUSE_MCP_PASSWORD: ${CLICKHOUSE_MCP_PASSWORD:-}
+      CLICKHOUSE_MCP_DB: ${CLICKHOUSE_MCP_DB:-default}
+      CLICKHOUSE_MCP_SECURE: ${CLICKHOUSE_MCP_SECURE:-false}
+      CLICKHOUSE_MCP_INSECURE_SKIP_VERIFY: ${CLICKHOUSE_MCP_INSECURE_SKIP_VERIFY:-false}
+      CLICKHOUSE_MCP_ALLOW_WRITE: ${CLICKHOUSE_MCP_ALLOW_WRITE:-false}
+      CLICKHOUSE_MCP_DEFAULT_LIMIT: ${CLICKHOUSE_MCP_DEFAULT_LIMIT:-100}
+      CLICKHOUSE_MCP_MAX_LIMIT: ${CLICKHOUSE_MCP_MAX_LIMIT:-10000}
     restart: unless-stopped
-    volumes:
-      - ./logs:/app/logs
-    extra_hosts:
-      - "host.docker.internal:host-gateway" 
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:${PORT:-8082}/healthz | grep -q ok"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 15s

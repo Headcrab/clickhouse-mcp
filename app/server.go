@@ -1,10 +1,12 @@
 package app
 
 import (
+	"context"
+	"errors"
 	"fmt"
 	"log/slog"
+	"net/http"
 	"os"
-	"strings"
 
 	"clickhouse-mcp/clickhouse"
 	"clickhouse-mcp/mcp"
@@ -12,67 +14,13 @@ import (
 	"github.com/mark3labs/mcp-go/server"
 )
 
-// ServerConfig содержит конфигурацию сервера
-type ServerConfig struct {
-	Transport     string
-	TestMode      bool
-	ClickhouseURL string
-	Username      string
-	Password      string
-	Database      string
-	Secure        bool
-	Port          int
-}
-
 // Server инкапсулирует логику запуска и настройки MCP сервера
 type Server struct {
-	config        ServerConfig
-	mcpServer     *server.MCPServer
-	tools         mcp.ToolHandler
-	chClient      clickhouse.Client
-	clickhouseDSN string
-}
-
-// ParseClickhouseURL разбирает URL подключения к ClickHouse
-func ParseClickhouseURL(url string) (string, int, string, error) {
-	// Для тестового режима вернем дефолтные значения
-	if url == "" || strings.HasPrefix(url, "localhost") {
-		return "localhost", 9000, "default", nil
-	}
-
-	// Удаляем протокол, если есть
-	cleanURL := url
-	cleanURL = strings.TrimPrefix(cleanURL, "clickhouse://")
-
-	// Разбиваем на части: host:port/database
-	parts := strings.Split(cleanURL, "/")
-
-	var host string
-	var port int = 9000             // По умолчанию
-	var database string = "default" // По умолчанию
-
-	if len(parts) > 0 {
-		hostPort := parts[0]
-		hostPortParts := strings.Split(hostPort, ":")
-
-		host = hostPortParts[0]
-		if len(hostPortParts) > 1 {
-			_, err := fmt.Sscanf(hostPortParts[1], "%d", &port)
-			if err != nil {
-				port = 9000 // По умолчанию, если не удалось распарсить
-			}
-		}
-
-		if len(parts) > 1 {
-			database = parts[1]
-		}
-	}
-
-	if host == "" {
-		return "", 0, "", fmt.Errorf("неверный формат URL ClickHouse: %s", url)
-	}
-
-	return host, port, database, nil
+	config     ServerConfig
+	mcpServer  *server.MCPServer
+	tools      mcp.ToolHandler
+	chClient   clickhouse.Client
+	httpServer *http.Server
 }
 
 // NewServer создает новый экземпляр сервера
@@ -82,10 +30,13 @@ func NewServer(config ServerConfig) (*Server, error) {
 		Level: slog.LevelInfo,
 	})))
 
+	if err := config.Validate(); err != nil {
+		return nil, fmt.Errorf("ошибка конфигурации: %w", err)
+	}
+
 	// Создаем сервер
 	server := &Server{
-		config:        config,
-		clickhouseDSN: config.ClickhouseURL,
+		config: config,
 	}
 
 	// В тестовом режиме не нужно подключаться к ClickHouse
@@ -101,7 +52,7 @@ func NewServer(config ServerConfig) (*Server, error) {
 	}
 
 	// Создаем обработчик инструментов
-	server.tools = mcp.NewToolHandler(server.chClient)
+	server.tools = mcp.NewToolHandler(server.chClient, config.QueryPolicy())
 
 	// Создаем MCP сервер
 	server.mcpServer = server.createMCPServer()
@@ -114,31 +65,14 @@ func NewServer(config ServerConfig) (*Server, error) {
 
 // connectToClickhouse устанавливает соединение с ClickHouse
 func (s *Server) connectToClickhouse() error {
-	host, port, database, err := ParseClickhouseURL(s.config.ClickhouseURL)
-	if err != nil {
-		return err
-	}
-
 	slog.Info("Подключение к ClickHouse",
-		"host", host,
-		"port", port,
-		"database", database,
+		"host", s.config.ClickhouseHost,
+		"port", s.config.ClickhousePort,
+		"database", s.config.Database,
+		"secure", s.config.Secure,
 	)
 
-	// Если база данных указана в конфигурации, используем ее
-	if s.config.Database != "" {
-		database = s.config.Database
-	}
-
-	// Создаем клиента для подключения к ClickHouse
-	client, err := clickhouse.NewClient(clickhouse.Config{
-		Host:     host,
-		Port:     port,
-		Database: database,
-		Username: s.config.Username,
-		Password: s.config.Password,
-		Secure:   s.config.Secure,
-	})
+	client, err := clickhouse.NewClient(s.config.ClickHouseConfig())
 	if err != nil {
 		return fmt.Errorf("ошибка подключения к ClickHouse: %w", err)
 	}
@@ -161,16 +95,16 @@ func (s *Server) RunTests() {
 	slog.Info("Запуск тестовых примеров")
 
 	fmt.Println("=== Пример запроса для получения списка баз данных ===")
-	fmt.Println(`{"jsonrpc":"2.0","id":"test","method":"mcp.call","params":{"tool":"get_databases","arguments":{}}}`)
+	fmt.Println(`{"jsonrpc":"2.0","id":"test","method":"tools/call","params":{"name":"get_databases","arguments":{}}}`)
 
 	fmt.Println("\n=== Пример запроса для получения списка таблиц ===")
-	fmt.Println(`{"jsonrpc":"2.0","id":"test","method":"mcp.call","params":{"tool":"get_tables","arguments":{"database":"default"}}}`)
+	fmt.Println(`{"jsonrpc":"2.0","id":"test","method":"tools/call","params":{"name":"get_tables","arguments":{"database":"default"}}}`)
 
 	fmt.Println("\n=== Пример запроса для получения схемы таблицы ===")
-	fmt.Println(`{"jsonrpc":"2.0","id":"test","method":"mcp.call","params":{"tool":"get_schema","arguments":{"database":"default","table":"some_table"}}}`)
+	fmt.Println(`{"jsonrpc":"2.0","id":"test","method":"tools/call","params":{"name":"get_schema","arguments":{"database":"default","table":"some_table"}}}`)
 
 	fmt.Println("\n=== Пример запроса для выполнения SQL запроса ===")
-	fmt.Println(`{"jsonrpc":"2.0","id":"test","method":"mcp.call","params":{"tool":"query","arguments":{"query":"SELECT 1 as test","limit":10}}}`)
+	fmt.Println(`{"jsonrpc":"2.0","id":"test","method":"tools/call","params":{"name":"query","arguments":{"query":"SELECT 1 as test","limit":10}}}`)
 
 	fmt.Println("\nЗапустите сервер без флага -test и отправьте запросы через клиент MCP")
 }
@@ -184,9 +118,32 @@ func (s *Server) Start() error {
 
 	if s.config.Transport == "sse" {
 		addr := fmt.Sprintf(":%d", s.config.Port)
-		sseServer := server.NewSSEServer(s.mcpServer, server.WithBaseURL(fmt.Sprintf("http://localhost%s", addr)))
-		slog.Info("SSE server запущен", "address", addr)
-		if err := sseServer.Start(addr); err != nil {
+		baseURL := s.config.SSEBaseURL()
+		sseServer := server.NewSSEServer(s.mcpServer, server.WithBaseURL(baseURL))
+		mux := http.NewServeMux()
+		mux.HandleFunc("/healthz", func(w http.ResponseWriter, _ *http.Request) {
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte("ok"))
+		})
+		mux.Handle("/", sseServer)
+
+		s.httpServer = &http.Server{
+			Addr:    addr,
+			Handler: mux,
+		}
+
+		if s.config.PublicBaseURL == "" {
+			slog.Warn("public-base-url не задан: advertised SSE endpoint подходит только для локального доступа",
+				"base_url", baseURL,
+			)
+		}
+
+		slog.Info("SSE сервер запущен",
+			"listen_address", addr,
+			"base_url", baseURL,
+			"healthcheck", fmt.Sprintf("http://127.0.0.1:%d/healthz", s.config.Port),
+		)
+		if err := s.httpServer.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
 			return fmt.Errorf("ошибка запуска SSE сервера: %w", err)
 		}
 	} else {
@@ -201,6 +158,11 @@ func (s *Server) Start() error {
 
 // Close закрывает соединения
 func (s *Server) Close() error {
+	if s.httpServer != nil {
+		if err := s.httpServer.Shutdown(context.Background()); err != nil && !errors.Is(err, http.ErrServerClosed) {
+			return err
+		}
+	}
 	if s.chClient != nil {
 		return s.chClient.Close()
 	}

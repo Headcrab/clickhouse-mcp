@@ -30,12 +30,14 @@ type ToolHandler interface {
 // DefaultToolHandler - стандартная реализация обработчика инструментов
 type DefaultToolHandler struct {
 	client clickhouse.Client
+	policy clickhouse.QueryPolicy
 }
 
 // NewToolHandler создает новый экземпляр обработчика инструментов
-func NewToolHandler(client clickhouse.Client) ToolHandler {
+func NewToolHandler(client clickhouse.Client, policy clickhouse.QueryPolicy) ToolHandler {
 	return &DefaultToolHandler{
 		client: client,
+		policy: policy,
 	}
 }
 
@@ -51,6 +53,10 @@ func (h *DefaultToolHandler) HandleGetDatabasesTool(
 
 	// Форматируем результат в текстовый вид
 	result := "Базы данных в ClickHouse:\n\n"
+	if len(databases) == 0 {
+		result += "Базы данных не найдены."
+		return mcp.NewToolResultText(result), nil
+	}
 	for i, db := range databases {
 		result += fmt.Sprintf("%d. %s\n", i+1, db)
 	}
@@ -137,12 +143,19 @@ func (h *DefaultToolHandler) HandleQueryTool(
 	}
 
 	// Извлекаем лимит, если он задан
-	if limitVal, ok := arguments["limit"].(float64); ok {
+	switch limitVal := arguments["limit"].(type) {
+	case float64:
 		limit = int(limitVal)
+	case int:
+		limit = limitVal
 	}
 
-	// Выполняем запрос
-	results, err := h.client.QueryData(ctx, query, limit)
+	prepared, err := clickhouse.PrepareQuery(query, limit, h.policy)
+	if err != nil {
+		return mcp.NewToolResultError(fmt.Sprintf("Ошибка валидации запроса: %s", err)), nil
+	}
+
+	results, err := h.client.QueryData(ctx, prepared.Query)
 	if err != nil {
 		return mcp.NewToolResultError(fmt.Sprintf("Ошибка выполнения запроса: %s", err)), nil
 	}

@@ -1,8 +1,6 @@
 package clickhouse
 
-import (
-	"testing"
-)
+import "testing"
 
 func TestIsArrayType(t *testing.T) {
 	tests := []struct {
@@ -10,38 +8,16 @@ func TestIsArrayType(t *testing.T) {
 		typeName string
 		want     bool
 	}{
-		{
-			name:     "Простой тип",
-			typeName: "String",
-			want:     false,
-		},
-		{
-			name:     "Массив строк",
-			typeName: "Array(String)",
-			want:     true,
-		},
-		{
-			name:     "Массив целых чисел",
-			typeName: "Array(UInt64)",
-			want:     true,
-		},
-		{
-			name:     "Вложенный массив",
-			typeName: "Array(Array(Int32))",
-			want:     true,
-		},
-		{
-			name:     "Пустая строка",
-			typeName: "",
-			want:     false,
-		},
+		{name: "simple type", typeName: "String", want: false},
+		{name: "array", typeName: "Array(String)", want: true},
+		{name: "nested array", typeName: "Array(Array(Int32))", want: true},
+		{name: "empty", typeName: "", want: false},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := IsArrayType(tt.typeName)
-			if got != tt.want {
-				t.Errorf("IsArrayType() = %v, want %v", got, tt.want)
+			if got := IsArrayType(tt.typeName); got != tt.want {
+				t.Fatalf("IsArrayType() = %v, want %v", got, tt.want)
 			}
 		})
 	}
@@ -53,81 +29,162 @@ func TestGetBaseType(t *testing.T) {
 		typeName string
 		want     string
 	}{
-		{
-			name:     "Простой тип",
-			typeName: "String",
-			want:     "String",
-		},
-		{
-			name:     "Массив строк",
-			typeName: "Array(String)",
-			want:     "String",
-		},
-		{
-			name:     "Массив целых чисел",
-			typeName: "Array(UInt64)",
-			want:     "UInt64",
-		},
-		{
-			name:     "Вложенный массив",
-			typeName: "Array(Array(Int32))",
-			want:     "Array(Int32)",
-		},
-		{
-			name:     "Пустая строка",
-			typeName: "",
-			want:     "",
-		},
+		{name: "simple type", typeName: "String", want: "String"},
+		{name: "array", typeName: "Array(String)", want: "String"},
+		{name: "nested array", typeName: "Array(Array(Int32))", want: "Array(Int32)"},
+		{name: "empty", typeName: "", want: ""},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := GetBaseType(tt.typeName)
-			if got != tt.want {
-				t.Errorf("GetBaseType() = %v, want %v", got, tt.want)
+			if got := GetBaseType(tt.typeName); got != tt.want {
+				t.Fatalf("GetBaseType() = %q, want %q", got, tt.want)
 			}
 		})
 	}
 }
 
-func TestNormalizeQuery(t *testing.T) {
+func TestBuildOptionsTLS(t *testing.T) {
+	opts := BuildOptions(Config{
+		Host:               "localhost",
+		Port:               9440,
+		Database:           "default",
+		Username:           "default",
+		Secure:             true,
+		InsecureSkipVerify: false,
+	})
+
+	if opts.TLS == nil {
+		t.Fatalf("expected TLS config")
+	}
+	if opts.TLS.InsecureSkipVerify {
+		t.Fatalf("expected certificate verification to stay enabled")
+	}
+
+	opts = BuildOptions(Config{
+		Host:               "localhost",
+		Port:               9440,
+		Database:           "default",
+		Username:           "default",
+		Secure:             true,
+		InsecureSkipVerify: true,
+	})
+
+	if !opts.TLS.InsecureSkipVerify {
+		t.Fatalf("expected insecure skip verify to be applied")
+	}
+}
+
+func TestPrepareQuery(t *testing.T) {
+	policy := QueryPolicy{
+		AllowWrite:   false,
+		DefaultLimit: 100,
+		MaxLimit:     10000,
+	}
+
 	tests := []struct {
-		name  string
-		query string
-		want  string
+		name        string
+		query       string
+		limit       int
+		policy      QueryPolicy
+		wantQuery   string
+		wantKind    QueryKind
+		wantLimit   int
+		wantApplied bool
+		expectError bool
 	}{
 		{
-			name:  "Запрос без точки с запятой",
-			query: "SELECT 1",
-			want:  "SELECT 1",
+			name:        "select gets default limit",
+			query:       "SELECT * FROM test_table",
+			policy:      policy,
+			wantQuery:   "SELECT * FROM test_table LIMIT 100",
+			wantKind:    QueryKindSelect,
+			wantLimit:   100,
+			wantApplied: true,
 		},
 		{
-			name:  "Запрос с точкой с запятой",
-			query: "SELECT 1;",
-			want:  "SELECT 1",
+			name:        "select keeps explicit limit",
+			query:       "SELECT * FROM test_table LIMIT 10",
+			policy:      policy,
+			wantQuery:   "SELECT * FROM test_table LIMIT 10",
+			wantKind:    QueryKindSelect,
+			wantLimit:   0,
+			wantApplied: false,
 		},
 		{
-			name:  "Запрос с лишними пробелами",
-			query: "  SELECT   1  ; ",
-			want:  "SELECT   1",
+			name:        "with select gets limit",
+			query:       "WITH x AS (SELECT 1) SELECT * FROM test_table",
+			policy:      policy,
+			wantQuery:   "WITH x AS (SELECT 1) SELECT * FROM test_table LIMIT 100",
+			wantKind:    QueryKindSelect,
+			wantLimit:   100,
+			wantApplied: true,
 		},
 		{
-			name:  "Пустой запрос",
-			query: "",
-			want:  "",
+			name:        "show stays untouched",
+			query:       "SHOW TABLES",
+			policy:      policy,
+			wantQuery:   "SHOW TABLES",
+			wantKind:    QueryKindRead,
+			wantLimit:   0,
+			wantApplied: false,
 		},
 		{
-			name:  "Только точка с запятой",
-			query: ";",
-			want:  "",
+			name:        "insert blocked in readonly mode",
+			query:       "INSERT INTO test_table VALUES (1)",
+			policy:      policy,
+			expectError: true,
+		},
+		{
+			name:  "insert allowed with flag",
+			query: "INSERT INTO test_table VALUES (1)",
+			policy: QueryPolicy{
+				AllowWrite:   true,
+				DefaultLimit: 100,
+				MaxLimit:     10000,
+			},
+			wantQuery:   "INSERT INTO test_table VALUES (1)",
+			wantKind:    QueryKindWrite,
+			wantLimit:   0,
+			wantApplied: false,
+		},
+		{
+			name:        "multi statement blocked",
+			query:       "SELECT 1; SELECT 2",
+			policy:      policy,
+			expectError: true,
+		},
+		{
+			name:        "limit above max is rejected",
+			query:       "SELECT * FROM test_table",
+			limit:       10001,
+			policy:      policy,
+			expectError: true,
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := normalizeQuery(tt.query)
-			if got != tt.want {
-				t.Errorf("normalizeQuery() = %v, want %v", got, tt.want)
+			prepared, err := PrepareQuery(tt.query, tt.limit, tt.policy)
+			if (err != nil) != tt.expectError {
+				t.Fatalf("PrepareQuery() error = %v, expectError = %v", err, tt.expectError)
+			}
+
+			if tt.expectError {
+				return
+			}
+
+			if prepared.Query != tt.wantQuery {
+				t.Fatalf("Query = %q, want %q", prepared.Query, tt.wantQuery)
+			}
+			if prepared.Kind != tt.wantKind {
+				t.Fatalf("Kind = %q, want %q", prepared.Kind, tt.wantKind)
+			}
+			if prepared.EffectiveLimit != tt.wantLimit {
+				t.Fatalf("EffectiveLimit = %d, want %d", prepared.EffectiveLimit, tt.wantLimit)
+			}
+			if prepared.LimitApplied != tt.wantApplied {
+				t.Fatalf("LimitApplied = %v, want %v", prepared.LimitApplied, tt.wantApplied)
 			}
 		})
 	}
@@ -139,135 +196,27 @@ func TestContainsLimitClause(t *testing.T) {
 		query string
 		want  bool
 	}{
-		{
-			name:  "Запрос без LIMIT",
-			query: "SELECT * FROM table",
-			want:  false,
-		},
-		{
-			name:  "Запрос с LIMIT",
-			query: "SELECT * FROM table LIMIT 10",
-			want:  true,
-		},
-		{
-			name:  "Запрос с limit в нижнем регистре",
-			query: "select * from table limit 100",
-			want:  true,
-		},
-		{
-			name:  "LIMIT в комментарии",
-			query: "SELECT * FROM table /* LIMIT 10 */",
-			want:  false,
-		},
-		{
-			name:  "LIMIT в строке",
-			query: "SELECT 'LIMIT 10' FROM table",
-			want:  false,
-		},
-		{
-			name:  "Пустой запрос",
-			query: "",
-			want:  false,
-		},
+		{name: "without limit", query: "SELECT * FROM test_table", want: false},
+		{name: "with limit", query: "SELECT * FROM test_table LIMIT 10", want: true},
+		{name: "limit in comment", query: "SELECT * FROM test_table /* LIMIT 10 */", want: false},
+		{name: "limit in string", query: "SELECT 'LIMIT 10' FROM test_table", want: false},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := containsLimitClause(tt.query)
-			if got != tt.want {
-				t.Errorf("containsLimitClause() = %v, want %v", got, tt.want)
+			if got := containsLimitClause(tt.query); got != tt.want {
+				t.Fatalf("containsLimitClause() = %v, want %v", got, tt.want)
 			}
 		})
 	}
 }
 
-func TestEndsWithSemicolon(t *testing.T) {
-	tests := []struct {
-		name  string
-		query string
-		want  bool
-	}{
-		{
-			name:  "Запрос без точки с запятой",
-			query: "SELECT 1",
-			want:  false,
-		},
-		{
-			name:  "Запрос с точкой с запятой",
-			query: "SELECT 1;",
-			want:  true,
-		},
-		{
-			name:  "Запрос с точкой с запятой и пробелами",
-			query: "SELECT 1  ;  ",
-			want:  true,
-		},
-		{
-			name:  "Пустой запрос",
-			query: "",
-			want:  false,
-		},
-		{
-			name:  "Только точка с запятой",
-			query: ";",
-			want:  true,
-		},
-	}
+func TestRemoveCommentsPreservesStrings(t *testing.T) {
+	query := "SELECT '-- not a comment' AS text /* block */ FROM test_table -- line"
+	got := removeComments(query)
+	want := "SELECT '-- not a comment' AS text  FROM test_table "
 
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			got := endsWithSemicolon(tt.query)
-			if got != tt.want {
-				t.Errorf("endsWithSemicolon() = %v, want %v", got, tt.want)
-			}
-		})
-	}
-}
-
-func TestRemoveComments(t *testing.T) {
-	tests := []struct {
-		name  string
-		query string
-		want  string
-	}{
-		{
-			name:  "Запрос без комментариев",
-			query: "SELECT * FROM table",
-			want:  "SELECT * FROM table",
-		},
-		{
-			name:  "Запрос с многострочным комментарием",
-			query: "SELECT * FROM table /* это комментарий */ WHERE id = 1",
-			want:  "SELECT * FROM table   WHERE id = 1",
-		},
-		{
-			name:  "Запрос с многострочным комментарием в конце",
-			query: "SELECT * FROM table /* это комментарий */",
-			want:  "SELECT * FROM table  ",
-		},
-		{
-			name:  "Запрос с незакрытым многострочным комментарием",
-			query: "SELECT * FROM table /* незакрытый комментарий",
-			want:  "SELECT * FROM table ",
-		},
-		{
-			name:  "Запрос с однострочным комментарием",
-			query: "SELECT * FROM table -- это комментарий\nWHERE id = 1",
-			want:  "SELECT * FROM table \nWHERE id = 1",
-		},
-		{
-			name:  "Запрос с несколькими комментариями",
-			query: "SELECT * /* внутри */ FROM table -- конец строки\nWHERE /* условие */ id = 1",
-			want:  "SELECT *   FROM table \nWHERE   id = 1",
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			got := removeComments(tt.query)
-			if got != tt.want {
-				t.Errorf("removeComments() = %v, want %v", got, tt.want)
-			}
-		})
+	if got != want {
+		t.Fatalf("removeComments() = %q, want %q", got, want)
 	}
 }

@@ -2,30 +2,22 @@ FROM golang:1.24.1-alpine AS builder
 
 WORKDIR /app
 
-# Copy go.mod and go.sum first for caching dependencies
 COPY go.mod go.sum ./
-
-# Download dependencies
 RUN go mod download
 
-# Copy the source code
 COPY . .
+RUN go build -trimpath -ldflags="-s -w" -o /out/clickhouse-mcp .
 
-# Build the application
-RUN go build -ldflags="-s -w" -o clickhouse-mcp .
-
-FROM alpine:latest
+FROM alpine:3.21
 
 WORKDIR /app
 
-# Copy the built binary from the builder stage
-COPY --from=builder /app/clickhouse-mcp ./
+COPY --from=builder /out/clickhouse-mcp ./clickhouse-mcp
 
-# Создаем директорию для логов
-RUN mkdir -p /app/logs
+ENV CLICKHOUSE_MCP_TRANSPORT=sse
+ENV CLICKHOUSE_MCP_PORT=8082
+EXPOSE 8082
 
-# Установка переменной окружения для порта (по умолчанию 8080)
-ENV PORT=8082
+HEALTHCHECK --interval=10s --timeout=3s --start-period=10s --retries=5 CMD wget -qO- "http://127.0.0.1:${CLICKHOUSE_MCP_PORT:-8082}/healthz" | grep -q "ok" || exit 1
 
-# Запуск сервера через SSE с заданным портом
-ENTRYPOINT ["sh", "-c", "./clickhouse-mcp -t=sse -port=${PORT} -url=${CLICKHOUSE_URL:-localhost:9000} -user=${CLICKHOUSE_USER:-default} -password=${CLICKHOUSE_PASSWORD:-password} -db=${CLICKHOUSE_DB:-default} -secure=${CLICKHOUSE_SECURE:-false} -port=${PORT}"]
+ENTRYPOINT ["sh", "-c", "exec ./clickhouse-mcp -transport=${CLICKHOUSE_MCP_TRANSPORT:-sse} -port=${CLICKHOUSE_MCP_PORT:-8082} -public-base-url=${CLICKHOUSE_MCP_PUBLIC_BASE_URL:-http://localhost:${CLICKHOUSE_MCP_PORT:-8082}} -url=${CLICKHOUSE_MCP_URL:-clickhouse:9000/default} -user=${CLICKHOUSE_MCP_USER:-default} -password=${CLICKHOUSE_MCP_PASSWORD:-} -db=${CLICKHOUSE_MCP_DB:-} -secure=${CLICKHOUSE_MCP_SECURE:-false} -insecure-skip-verify=${CLICKHOUSE_MCP_INSECURE_SKIP_VERIFY:-false} -allow-write=${CLICKHOUSE_MCP_ALLOW_WRITE:-false} -default-query-limit=${CLICKHOUSE_MCP_DEFAULT_LIMIT:-100} -max-query-limit=${CLICKHOUSE_MCP_MAX_LIMIT:-10000}"]

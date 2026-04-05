@@ -7,32 +7,21 @@ import (
 	"strings"
 	"time"
 
-	"github.com/ClickHouse/clickhouse-go/v2"
+	driverapi "github.com/ClickHouse/clickhouse-go/v2"
 	"github.com/ClickHouse/clickhouse-go/v2/lib/driver"
 )
 
-// Client определяет интерфейс для работы с ClickHouse
+// Client определяет интерфейс для работы с ClickHouse.
 type Client interface {
-	// GetDatabases возвращает список баз данных
 	GetDatabases(ctx context.Context) ([]string, error)
-
-	// GetTables возвращает список таблиц в указанной базе данных
 	GetTables(ctx context.Context, database string) ([]string, error)
-
-	// GetTableSchema возвращает схему указанной таблицы
 	GetTableSchema(ctx context.Context, database, table string) ([]ColumnInfo, error)
-
-	// QueryData выполняет запрос и возвращает результаты
-	QueryData(ctx context.Context, query string, limit int) (QueryResult, error)
-
-	// GetConnection возвращает соединение с ClickHouse
+	QueryData(ctx context.Context, query string) (QueryResult, error)
 	GetConnection() driver.Conn
-
-	// Close закрывает соединение с ClickHouse
 	Close() error
 }
 
-// ColumnInfo содержит информацию о колонке таблицы
+// ColumnInfo содержит информацию о колонке таблицы.
 type ColumnInfo struct {
 	Name     string `json:"name"`
 	Type     string `json:"type"`
@@ -41,32 +30,58 @@ type ColumnInfo struct {
 	IsNested bool   `json:"is_nested,omitempty"`
 }
 
-// QueryResult содержит результат выполнения запроса
+// QueryResult содержит результат выполнения запроса.
 type QueryResult struct {
 	Columns []ColumnInfo     `json:"columns"`
 	Rows    []map[string]any `json:"rows"`
 }
 
-// DefaultClient - стандартная реализация клиента ClickHouse
+// QueryPolicy задает продуктовые правила выполнения SQL.
+type QueryPolicy struct {
+	AllowWrite   bool
+	DefaultLimit int
+	MaxLimit     int
+}
+
+// PreparedQuery содержит нормализованный SQL и сопутствующую метаинформацию.
+type PreparedQuery struct {
+	Query          string
+	Kind           QueryKind
+	LimitApplied   bool
+	EffectiveLimit int
+}
+
+// QueryKind описывает тип SQL-запроса с точки зрения продуктовой политики.
+type QueryKind string
+
+const (
+	QueryKindUnknown QueryKind = "unknown"
+	QueryKindRead    QueryKind = "read"
+	QueryKindSelect  QueryKind = "select"
+	QueryKindWrite   QueryKind = "write"
+)
+
+// DefaultClient - стандартная реализация клиента ClickHouse.
 type DefaultClient struct {
 	conn driver.Conn
 }
 
-// Config содержит настройки подключения к ClickHouse
+// Config содержит настройки подключения к ClickHouse.
 type Config struct {
-	Host     string
-	Port     int
-	Database string
-	Username string
-	Password string
-	Secure   bool
+	Host               string
+	Port               int
+	Database           string
+	Username           string
+	Password           string
+	Secure             bool
+	InsecureSkipVerify bool
 }
 
-// NewClient создает новый экземпляр клиента ClickHouse
-func NewClient(cfg Config) (Client, error) {
-	opts := &clickhouse.Options{
+// BuildOptions собирает clickhouse.Options из продуктового конфига.
+func BuildOptions(cfg Config) *driverapi.Options {
+	opts := &driverapi.Options{
 		Addr: []string{fmt.Sprintf("%s:%d", cfg.Host, cfg.Port)},
-		Auth: clickhouse.Auth{
+		Auth: driverapi.Auth{
 			Database: cfg.Database,
 			Username: cfg.Username,
 			Password: cfg.Password,
@@ -75,10 +90,10 @@ func NewClient(cfg Config) (Client, error) {
 		MaxOpenConns:    10,
 		MaxIdleConns:    5,
 		ConnMaxLifetime: 10 * time.Minute,
-		Compression: &clickhouse.Compression{
-			Method: clickhouse.CompressionLZ4,
+		Compression: &driverapi.Compression{
+			Method: driverapi.CompressionLZ4,
 		},
-		Settings: clickhouse.Settings{
+		Settings: driverapi.Settings{
 			"allow_experimental_object_type":             1,
 			"output_format_json_named_tuples_as_objects": 1,
 			"allow_suspicious_low_cardinality_types":     1,
@@ -89,16 +104,21 @@ func NewClient(cfg Config) (Client, error) {
 
 	if cfg.Secure {
 		opts.TLS = &tls.Config{
-			InsecureSkipVerify: true,
+			InsecureSkipVerify: cfg.InsecureSkipVerify,
+			MinVersion:         tls.VersionTLS12,
 		}
 	}
 
-	conn, err := clickhouse.Open(opts)
+	return opts
+}
+
+// NewClient создает новый экземпляр клиента ClickHouse.
+func NewClient(cfg Config) (Client, error) {
+	conn, err := driverapi.Open(BuildOptions(cfg))
 	if err != nil {
 		return nil, fmt.Errorf("ошибка подключения к ClickHouse: %w", err)
 	}
 
-	// Проверяем соединение
 	if err := conn.Ping(context.Background()); err != nil {
 		return nil, fmt.Errorf("ошибка проверки соединения: %w", err)
 	}
@@ -106,7 +126,7 @@ func NewClient(cfg Config) (Client, error) {
 	return &DefaultClient{conn: conn}, nil
 }
 
-// GetDatabases возвращает список баз данных
+// GetDatabases возвращает список баз данных.
 func (c *DefaultClient) GetDatabases(ctx context.Context) ([]string, error) {
 	rows, err := c.conn.Query(ctx, "SHOW DATABASES")
 	if err != nil {
@@ -120,16 +140,19 @@ func (c *DefaultClient) GetDatabases(ctx context.Context) ([]string, error) {
 		if err := rows.Scan(&name); err != nil {
 			return nil, fmt.Errorf("ошибка сканирования базы данных: %w", err)
 		}
-		// Пропускаем системные базы данных
 		if name != "system" && name != "information_schema" {
 			databases = append(databases, name)
 		}
 	}
 
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("ошибка чтения списка баз данных: %w", err)
+	}
+
 	return databases, nil
 }
 
-// GetTables возвращает список таблиц в указанной базе данных
+// GetTables возвращает список таблиц в указанной базе данных.
 func (c *DefaultClient) GetTables(ctx context.Context, database string) ([]string, error) {
 	rows, err := c.conn.Query(ctx, fmt.Sprintf("SHOW TABLES FROM %s", database))
 	if err != nil {
@@ -146,10 +169,14 @@ func (c *DefaultClient) GetTables(ctx context.Context, database string) ([]strin
 		tables = append(tables, name)
 	}
 
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("ошибка чтения списка таблиц: %w", err)
+	}
+
 	return tables, nil
 }
 
-// GetTableSchema возвращает схему указанной таблицы
+// GetTableSchema возвращает схему указанной таблицы.
 func (c *DefaultClient) GetTableSchema(ctx context.Context, database, table string) ([]ColumnInfo, error) {
 	query := fmt.Sprintf("DESCRIBE TABLE %s.%s", database, table)
 	rows, err := c.conn.Query(ctx, query)
@@ -167,19 +194,15 @@ func (c *DefaultClient) GetTableSchema(ctx context.Context, database, table stri
 			return nil, fmt.Errorf("ошибка сканирования колонки: %w", err)
 		}
 
-		isArray := IsArrayType(typ)
-		isNested := len(typ) >= 7 && typ[:6] == "Nested"
-
 		columns = append(columns, ColumnInfo{
 			Name:     name,
 			Type:     typ,
 			Position: position,
-			IsArray:  isArray,
-			IsNested: isNested,
+			IsArray:  IsArrayType(typ),
+			IsNested: strings.HasPrefix(typ, "Nested"),
 		})
 	}
 
-	// Проверяем ошибки после цикла
 	if err := rows.Err(); err != nil {
 		return nil, fmt.Errorf("ошибка при получении схемы таблицы: %w", err)
 	}
@@ -187,53 +210,41 @@ func (c *DefaultClient) GetTableSchema(ctx context.Context, database, table stri
 	return columns, nil
 }
 
-// QueryData выполняет запрос и возвращает результаты в виде массива строк
-func (c *DefaultClient) QueryData(ctx context.Context, query string, limit int) (QueryResult, error) {
-	// Нормализуем запрос
-	cleanQuery := normalizeQuery(query)
-
-	limitedQuery := cleanQuery
-	if limit > 0 {
-		// Проверяем, содержит ли запрос уже LIMIT
-		if !containsLimitClause(cleanQuery) {
-			limitedQuery = fmt.Sprintf("%s LIMIT %d", cleanQuery, limit)
-		}
+// QueryData выполняет уже подготовленный SQL запрос.
+func (c *DefaultClient) QueryData(ctx context.Context, query string) (QueryResult, error) {
+	cleanQuery := strings.TrimSpace(query)
+	if cleanQuery == "" {
+		return QueryResult{}, fmt.Errorf("SQL запрос пустой")
 	}
 
-	// Проверяем соединение перед выполнением запроса
 	if err := c.ensureConnection(ctx); err != nil {
 		return QueryResult{}, fmt.Errorf("ошибка подключения: %w", err)
 	}
 
-	rows, err := c.conn.Query(ctx, limitedQuery)
+	rows, err := c.conn.Query(ctx, cleanQuery)
 	if err != nil {
 		return QueryResult{}, fmt.Errorf("ошибка выполнения запроса: %w", err)
 	}
 	defer rows.Close()
 
-	// Получаем информацию о колонках
 	columnTypes := rows.ColumnTypes()
 	columnNames := rows.Columns()
 
 	var columns []ColumnInfo
 	for i, ct := range columnTypes {
 		dbType := ct.DatabaseTypeName()
-		isArray := IsArrayType(dbType)
-		isNested := len(dbType) >= 7 && dbType[:6] == "Nested"
 
 		columns = append(columns, ColumnInfo{
 			Name:     ct.Name(),
 			Type:     dbType,
 			Position: i + 1,
-			IsArray:  isArray,
-			IsNested: isNested,
+			IsArray:  IsArrayType(dbType),
+			IsNested: strings.HasPrefix(dbType, "Nested"),
 		})
 	}
 
-	// Получаем данные
 	var results []map[string]any
 
-	// Создаем набор временных переменных для сканирования результатов
 	destPointers := make([]any, len(columnNames))
 	stringVars := make([]string, len(columnNames))
 	intVars := make([]int64, len(columnNames))
@@ -263,15 +274,11 @@ func (c *DefaultClient) QueryData(ctx context.Context, query string, limit int) 
 	}
 
 	for rows.Next() {
-		// Сканируем строку в предварительно созданные переменные
 		if err := rows.Scan(destPointers...); err != nil {
 			return QueryResult{}, fmt.Errorf("ошибка сканирования строки: %w", err)
 		}
 
-		// Создаем map для текущей строки
-		row := make(map[string]any)
-
-		// Копируем значения из временных переменных в результирующую map
+		row := make(map[string]any, len(columns))
 		for i, col := range columns {
 			switch col.Type {
 			case "String":
@@ -287,45 +294,13 @@ func (c *DefaultClient) QueryData(ctx context.Context, query string, limit int) 
 			case "Date", "DateTime":
 				row[col.Name] = timeVars[i].Format(time.RFC3339)
 			default:
-				// Для остальных типов копируем значение как есть
-				v := anyVars[i]
-
-				// Обработка специальных типов
-				switch val := v.(type) {
-				case []byte:
-					// Конвертируем []byte в string
-					row[col.Name] = string(val)
-				case []any:
-					// Обрабатываем массивы
-					if col.IsArray && len(val) > 0 {
-						// Проверяем первый элемент массива
-						if _, ok := val[0].([]byte); ok {
-							// Конвертируем массив []byte в []string
-							strArray := make([]string, len(val))
-							for j, item := range val {
-								if byteItem, ok := item.([]byte); ok {
-									strArray[j] = string(byteItem)
-								} else {
-									strArray[j] = fmt.Sprint(item)
-								}
-							}
-							row[col.Name] = strArray
-						} else {
-							row[col.Name] = val
-						}
-					} else {
-						row[col.Name] = val
-					}
-				default:
-					row[col.Name] = v
-				}
+				row[col.Name] = normalizeScannedValue(col, anyVars[i])
 			}
 		}
 
 		results = append(results, row)
 	}
 
-	// Проверяем наличие ошибок после цикла
 	if err := rows.Err(); err != nil {
 		return QueryResult{}, fmt.Errorf("ошибка при обработке результатов: %w", err)
 	}
@@ -336,95 +311,324 @@ func (c *DefaultClient) QueryData(ctx context.Context, query string, limit int) 
 	}, nil
 }
 
-// ensureConnection проверяет состояние соединения и пытается восстановить его при необходимости
+func normalizeScannedValue(col ColumnInfo, value any) any {
+	switch typed := value.(type) {
+	case []byte:
+		return string(typed)
+	case []any:
+		if col.IsArray && len(typed) > 0 {
+			if _, ok := typed[0].([]byte); ok {
+				strArray := make([]string, len(typed))
+				for i, item := range typed {
+					if byteItem, ok := item.([]byte); ok {
+						strArray[i] = string(byteItem)
+					} else {
+						strArray[i] = fmt.Sprint(item)
+					}
+				}
+				return strArray
+			}
+		}
+		return typed
+	default:
+		return value
+	}
+}
+
+// PrepareQuery применяет продуктовую политику к SQL.
+func PrepareQuery(query string, requestedLimit int, policy QueryPolicy) (PreparedQuery, error) {
+	normalized := normalizeQuery(query)
+	if normalized == "" {
+		return PreparedQuery{}, fmt.Errorf("SQL запрос пустой")
+	}
+
+	if hasMultipleStatements(normalized) {
+		return PreparedQuery{}, fmt.Errorf("многооператорные SQL запросы не поддерживаются")
+	}
+
+	analysis := analyzeQuery(normalized)
+	switch analysis.Kind {
+	case QueryKindWrite:
+		if !policy.AllowWrite {
+			return PreparedQuery{}, fmt.Errorf("запросы на изменение данных и схемы отключены; включите allow-write, если это действительно нужно")
+		}
+	case QueryKindUnknown:
+		if !policy.AllowWrite {
+			return PreparedQuery{}, fmt.Errorf("не удалось безопасно определить тип SQL запроса; в read-only режиме разрешены только SELECT, SHOW, DESCRIBE и EXPLAIN")
+		}
+	}
+
+	if requestedLimit < 0 {
+		return PreparedQuery{}, fmt.Errorf("limit не может быть отрицательным")
+	}
+
+	if requestedLimit > 0 && policy.MaxLimit > 0 && requestedLimit > policy.MaxLimit {
+		return PreparedQuery{}, fmt.Errorf("limit=%d превышает максимально допустимое значение %d", requestedLimit, policy.MaxLimit)
+	}
+
+	prepared := PreparedQuery{
+		Query: normalized,
+		Kind:  analysis.Kind,
+	}
+
+	if !analysis.LimitEligible || containsLimitClause(normalized) {
+		return prepared, nil
+	}
+
+	effectiveLimit := requestedLimit
+	if effectiveLimit == 0 {
+		effectiveLimit = policy.DefaultLimit
+	}
+
+	if effectiveLimit <= 0 {
+		return prepared, nil
+	}
+
+	prepared.Query = fmt.Sprintf("%s LIMIT %d", normalized, effectiveLimit)
+	prepared.LimitApplied = true
+	prepared.EffectiveLimit = effectiveLimit
+
+	return prepared, nil
+}
+
+type queryAnalysis struct {
+	Kind          QueryKind
+	LimitEligible bool
+}
+
+func analyzeQuery(query string) queryAnalysis {
+	tokens := tokenizeSQL(query)
+	statement := detectStatement(tokens)
+
+	switch statement {
+	case "SELECT":
+		return queryAnalysis{Kind: QueryKindSelect, LimitEligible: true}
+	case "SHOW", "DESCRIBE", "DESC", "EXPLAIN":
+		return queryAnalysis{Kind: QueryKindRead}
+	case "INSERT", "ALTER", "CREATE", "DROP", "TRUNCATE", "RENAME", "OPTIMIZE", "SYSTEM", "GRANT", "REVOKE":
+		return queryAnalysis{Kind: QueryKindWrite}
+	default:
+		return queryAnalysis{Kind: QueryKindUnknown}
+	}
+}
+
+func detectStatement(tokens []string) string {
+	if len(tokens) == 0 {
+		return ""
+	}
+
+	if tokens[0] != "WITH" {
+		return tokens[0]
+	}
+
+	for _, token := range tokens[1:] {
+		switch token {
+		case "SELECT", "SHOW", "DESCRIBE", "DESC", "EXPLAIN", "INSERT", "ALTER", "CREATE", "DROP", "TRUNCATE", "RENAME", "OPTIMIZE", "SYSTEM", "GRANT", "REVOKE":
+			return token
+		}
+	}
+
+	return "WITH"
+}
+
+// ensureConnection проверяет состояние соединения.
 func (c *DefaultClient) ensureConnection(ctx context.Context) error {
 	if err := c.conn.Ping(ctx); err != nil {
-		// Если соединение потеряно, логируем ошибку
 		return fmt.Errorf("потеряно соединение с ClickHouse: %w", err)
 	}
 	return nil
 }
 
-// normalizeQuery выполняет нормализацию SQL запроса
+// normalizeQuery выполняет безопасную нормализацию SQL запроса.
 func normalizeQuery(query string) string {
-	// Удаляем точки с запятой в конце запроса
 	query = strings.TrimSpace(query)
-	if len(query) > 0 && query[len(query)-1] == ';' {
-		query = query[:len(query)-1]
+	for strings.HasSuffix(query, ";") {
+		query = strings.TrimSpace(strings.TrimSuffix(query, ";"))
 	}
-
-	// Удаляем лишние пробелы
-	query = strings.TrimSpace(query)
-
 	return query
 }
 
-// containsLimitClause проверяет, содержит ли запрос уже LIMIT
+// containsLimitClause проверяет, содержит ли запрос уже LIMIT вне строк и комментариев.
 func containsLimitClause(query string) bool {
-	// Удаляем комментарии из запроса для проверки
-	queryWithoutComments := removeComments(query)
-	upperQuery := strings.ToUpper(queryWithoutComments)
-	return strings.Contains(upperQuery, " LIMIT ")
+	for _, token := range tokenizeSQL(query) {
+		if token == "LIMIT" {
+			return true
+		}
+	}
+	return false
 }
 
-// removeComments удаляет SQL комментарии из строки запроса
+func hasMultipleStatements(query string) bool {
+	tokens := tokenizeSQL(query)
+	seenSemicolon := false
+	for _, token := range tokens {
+		if token == ";" {
+			seenSemicolon = true
+			continue
+		}
+		if seenSemicolon {
+			return true
+		}
+	}
+	return false
+}
+
+// removeComments удаляет SQL комментарии из строки запроса.
 func removeComments(query string) string {
-	// Удаляем многострочные комментарии /* ... */
-	result := query
-	for {
-		startIdx := strings.Index(result, "/*")
-		if startIdx == -1 {
-			break
-		}
+	var result strings.Builder
+	state := scanStateNormal
 
-		endIdx := strings.Index(result[startIdx:], "*/")
-		if endIdx == -1 {
-			// Если нет закрывающего комментария, обрезаем строку
-			result = result[:startIdx]
-			break
-		}
+	for i := 0; i < len(query); i++ {
+		ch := query[i]
 
-		endIdx = startIdx + endIdx + 2 // +2 для учета "*/"
-		result = result[:startIdx] + " " + result[endIdx:]
+		switch state {
+		case scanStateNormal:
+			if ch == '\'' {
+				state = scanStateSingleQuote
+				result.WriteByte(ch)
+				continue
+			}
+			if ch == '"' {
+				state = scanStateDoubleQuote
+				result.WriteByte(ch)
+				continue
+			}
+			if ch == '`' {
+				state = scanStateBacktick
+				result.WriteByte(ch)
+				continue
+			}
+			if ch == '-' && i+1 < len(query) && query[i+1] == '-' {
+				state = scanStateLineComment
+				i++
+				continue
+			}
+			if ch == '/' && i+1 < len(query) && query[i+1] == '*' {
+				state = scanStateBlockComment
+				i++
+				continue
+			}
+			result.WriteByte(ch)
+		case scanStateSingleQuote:
+			result.WriteByte(ch)
+			if ch == '\'' && !isEscaped(query, i) {
+				state = scanStateNormal
+			}
+		case scanStateDoubleQuote:
+			result.WriteByte(ch)
+			if ch == '"' && !isEscaped(query, i) {
+				state = scanStateNormal
+			}
+		case scanStateBacktick:
+			result.WriteByte(ch)
+			if ch == '`' && !isEscaped(query, i) {
+				state = scanStateNormal
+			}
+		case scanStateLineComment:
+			if ch == '\n' {
+				state = scanStateNormal
+				result.WriteByte(ch)
+			}
+		case scanStateBlockComment:
+			if ch == '*' && i+1 < len(query) && query[i+1] == '/' {
+				state = scanStateNormal
+				i++
+			}
+		}
 	}
 
-	// Удаляем однострочные комментарии --
-	lines := strings.Split(result, "\n")
-	for i, line := range lines {
-		commentIdx := strings.Index(line, "--")
-		if commentIdx != -1 {
-			lines[i] = line[:commentIdx]
+	return result.String()
+}
+
+func tokenizeSQL(query string) []string {
+	trimmed := removeComments(query)
+	tokens := make([]string, 0, 8)
+	state := scanStateNormal
+
+	for i := 0; i < len(trimmed); i++ {
+		ch := trimmed[i]
+
+		switch state {
+		case scanStateNormal:
+			switch {
+			case ch == '\'':
+				state = scanStateSingleQuote
+			case ch == '"':
+				state = scanStateDoubleQuote
+			case ch == '`':
+				state = scanStateBacktick
+			case isWordStart(ch):
+				start := i
+				for i+1 < len(trimmed) && isWordPart(trimmed[i+1]) {
+					i++
+				}
+				tokens = append(tokens, strings.ToUpper(trimmed[start:i+1]))
+			case ch == ';':
+				tokens = append(tokens, ";")
+			}
+		case scanStateSingleQuote:
+			if ch == '\'' && !isEscaped(trimmed, i) {
+				state = scanStateNormal
+			}
+		case scanStateDoubleQuote:
+			if ch == '"' && !isEscaped(trimmed, i) {
+				state = scanStateNormal
+			}
+		case scanStateBacktick:
+			if ch == '`' && !isEscaped(trimmed, i) {
+				state = scanStateNormal
+			}
 		}
 	}
 
-	return strings.Join(lines, "\n")
+	return tokens
 }
 
-// endsWithSemicolon проверяет, заканчивается ли запрос точкой с запятой
-func endsWithSemicolon(query string) bool {
-	trimmed := strings.TrimSpace(query)
-	return len(trimmed) > 0 && trimmed[len(trimmed)-1] == ';'
+type scanState int
+
+const (
+	scanStateNormal scanState = iota
+	scanStateSingleQuote
+	scanStateDoubleQuote
+	scanStateBacktick
+	scanStateLineComment
+	scanStateBlockComment
+)
+
+func isEscaped(input string, index int) bool {
+	backslashes := 0
+	for i := index - 1; i >= 0 && input[i] == '\\'; i-- {
+		backslashes++
+	}
+	return backslashes%2 == 1
 }
 
-// GetConnection возвращает соединение с ClickHouse
+func isWordStart(ch byte) bool {
+	return (ch >= 'A' && ch <= 'Z') || (ch >= 'a' && ch <= 'z') || ch == '_'
+}
+
+func isWordPart(ch byte) bool {
+	return isWordStart(ch) || (ch >= '0' && ch <= '9')
+}
+
+// GetConnection возвращает соединение с ClickHouse.
 func (c *DefaultClient) GetConnection() driver.Conn {
 	return c.conn
 }
 
-// Close закрывает соединение с ClickHouse
+// Close закрывает соединение с ClickHouse.
 func (c *DefaultClient) Close() error {
 	return c.conn.Close()
 }
 
-// IsArrayType проверяет, является ли тип массивом
+// IsArrayType проверяет, является ли тип массивом.
 func IsArrayType(typeName string) bool {
-	return len(typeName) >= 6 && typeName[:5] == "Array"
+	return strings.HasPrefix(typeName, "Array(")
 }
 
-// GetBaseType возвращает базовый тип из названия типа ClickHouse
+// GetBaseType возвращает базовый тип из названия типа ClickHouse.
 func GetBaseType(typeName string) string {
 	if IsArrayType(typeName) {
-		// Удаляем Array() и получаем внутренний тип
 		return typeName[6 : len(typeName)-1]
 	}
 	return typeName

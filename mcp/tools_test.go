@@ -36,8 +36,8 @@ func (m *MockClickhouseClient) GetTableSchema(ctx context.Context, database, tab
 }
 
 // QueryData - мок метод
-func (m *MockClickhouseClient) QueryData(ctx context.Context, query string, limit int) (clickhouse.QueryResult, error) {
-	args := m.Called(ctx, query, limit)
+func (m *MockClickhouseClient) QueryData(ctx context.Context, query string) (clickhouse.QueryResult, error) {
+	args := m.Called(ctx, query)
 	return args.Get(0).(clickhouse.QueryResult), args.Error(1)
 }
 
@@ -76,7 +76,7 @@ func TestHandleGetDatabasesTool(t *testing.T) {
 	mockClient.On("GetDatabases", mock.Anything).Return([]string{"db1", "db2", "db3"}, nil)
 
 	// Создаем тестируемый обработчик
-	handler := NewToolHandler(mockClient)
+	handler := NewToolHandler(mockClient, clickhouse.QueryPolicy{DefaultLimit: 100, MaxLimit: 10000})
 
 	// Создаем тестовый запрос
 	request := mcp.CallToolRequest{}
@@ -106,7 +106,7 @@ func TestHandleGetTablesTool(t *testing.T) {
 	mockClient.On("GetTables", mock.Anything, "test_db").Return([]string{"table1", "table2"}, nil)
 
 	// Создаем тестируемый обработчик
-	handler := NewToolHandler(mockClient)
+	handler := NewToolHandler(mockClient, clickhouse.QueryPolicy{DefaultLimit: 100, MaxLimit: 10000})
 
 	// Тест 1: корректный запрос
 	t.Run("Valid Request", func(t *testing.T) {
@@ -162,7 +162,7 @@ func TestHandleGetTableSchemaTool(t *testing.T) {
 	}, nil)
 
 	// Создаем тестируемый обработчик
-	handler := NewToolHandler(mockClient)
+	handler := NewToolHandler(mockClient, clickhouse.QueryPolicy{DefaultLimit: 100, MaxLimit: 10000})
 
 	// Тест 1: корректный запрос
 	t.Run("Valid Request", func(t *testing.T) {
@@ -214,7 +214,7 @@ func TestHandleQueryTool(t *testing.T) {
 	mockClient := new(MockClickhouseClient)
 
 	// Устанавливаем ожидаемое поведение для запроса
-	mockClient.On("QueryData", mock.Anything, "SELECT 1 as test", 10).Return(clickhouse.QueryResult{
+	mockClient.On("QueryData", mock.Anything, "SELECT 1 as test LIMIT 10").Return(clickhouse.QueryResult{
 		Columns: []clickhouse.ColumnInfo{
 			{Name: "test", Type: "UInt8", Position: 1},
 		},
@@ -224,7 +224,7 @@ func TestHandleQueryTool(t *testing.T) {
 	}, nil)
 
 	// Создаем тестируемый обработчик
-	handler := NewToolHandler(mockClient)
+	handler := NewToolHandler(mockClient, clickhouse.QueryPolicy{DefaultLimit: 100, MaxLimit: 10000})
 
 	// Тест 1: корректный запрос с указанным лимитом
 	t.Run("Valid Request With Limit", func(t *testing.T) {
@@ -269,4 +269,23 @@ func TestHandleQueryTool(t *testing.T) {
 
 	// Проверяем, что все ожидаемые методы были вызваны
 	mockClient.AssertExpectations(t)
+}
+
+func TestHandleQueryToolRejectsWriteInReadOnlyMode(t *testing.T) {
+	mockClient := new(MockClickhouseClient)
+	handler := NewToolHandler(mockClient, clickhouse.QueryPolicy{DefaultLimit: 100, MaxLimit: 10000})
+
+	request := mcp.CallToolRequest{}
+	request.Params.Name = "query"
+	request.Params.Arguments = map[string]interface{}{
+		"query": "INSERT INTO test VALUES (1)",
+	}
+
+	result, err := handler.HandleQueryTool(context.Background(), request)
+
+	assert.NoError(t, err)
+	assert.NotNil(t, result)
+	assert.True(t, result.IsError)
+	assert.Contains(t, getText(result), "Ошибка валидации запроса")
+	mockClient.AssertNotCalled(t, "QueryData", mock.Anything, mock.Anything)
 }
