@@ -145,20 +145,29 @@ func mustIntegrationClient(t *testing.T) ch.Client {
 		t.Fatalf("invalid test url: %v", err)
 	}
 
-	client, err := ch.NewClient(ch.Config{
-		Host:               host,
-		Port:               port,
-		Database:           database,
-		Username:           user,
-		Password:           password,
-		Secure:             secure,
-		InsecureSkipVerify: insecureSkipVerify,
-	})
-	if err != nil {
-		t.Fatalf("NewClient() error = %v", err)
+	deadline := time.Now().Add(45 * time.Second)
+	var lastErr error
+
+	for time.Now().Before(deadline) {
+		client, err := ch.NewClient(ch.Config{
+			Host:               host,
+			Port:               port,
+			Database:           database,
+			Username:           user,
+			Password:           password,
+			Secure:             secure,
+			InsecureSkipVerify: insecureSkipVerify,
+		})
+		if err == nil {
+			return client
+		}
+
+		lastErr = err
+		time.Sleep(2 * time.Second)
 	}
 
-	return client
+	t.Fatalf("NewClient() did not succeed before timeout: %v", lastErr)
+	return nil
 }
 
 func envOr(key, fallback string) string {
