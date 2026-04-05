@@ -130,7 +130,10 @@ func mustIntegrationClient(t *testing.T) ch.Client {
 
 	url := envOr("CLICKHOUSE_MCP_TEST_URL", envOr("CLICKHOUSE_MCP_URL", "localhost:9000/default"))
 	user := envOr("CLICKHOUSE_MCP_TEST_USER", envOr("CLICKHOUSE_MCP_USER", "default"))
-	password := envOr("CLICKHOUSE_MCP_TEST_PASSWORD", envOr("CLICKHOUSE_MCP_PASSWORD", ""))
+	password := envOr(
+		"CLICKHOUSE_MCP_TEST_PASSWORD",
+		envOr("CLICKHOUSE_MCP_PASSWORD", envOr("CLICKHOUSE_PASSWORD", "")),
+	)
 	secure := envBoolOr("CLICKHOUSE_MCP_TEST_SECURE", false)
 	insecureSkipVerify := envBoolOr("CLICKHOUSE_MCP_TEST_INSECURE_SKIP_VERIFY", false)
 

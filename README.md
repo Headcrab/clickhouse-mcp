@@ -71,10 +71,12 @@ docker run --rm -p 8082:8082 \
   -e CLICKHOUSE_MCP_PUBLIC_BASE_URL=http://localhost:8082 \
   -e CLICKHOUSE_MCP_URL=host.docker.internal:9000/default \
   -e CLICKHOUSE_MCP_USER=default \
+  -e CLICKHOUSE_MCP_PASSWORD=clickhouse \
   clickhouse-mcp
 ```
 
 Если ClickHouse стоит на хосте Linux, добавьте `--add-host=host.docker.internal:host-gateway`.
+Если ваш ClickHouse слушает `default` без сетевого доступа, задайте пароль явно: без этого официальный Docker-образ не пустит MCP-клиент по TCP.
 
 ### Docker Compose
 
@@ -86,6 +88,8 @@ docker compose up -d
 
 - `clickhouse` на `9000` и `8123`;
 - `clickhouse-mcp` на `8082`.
+- логин ClickHouse: `default`
+- пароль ClickHouse: `clickhouse`
 
 Healthcheck MCP:
 
@@ -257,6 +261,7 @@ docker build -t clickhouse-mcp:test .
 ```bash
 CLICKHOUSE_MCP_INTEGRATION=1 \
 CLICKHOUSE_MCP_TEST_URL=localhost:9000/default \
+CLICKHOUSE_MCP_TEST_PASSWORD=clickhouse \
 go test ./...
 ```
 

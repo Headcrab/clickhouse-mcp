@@ -7,8 +7,9 @@ services:
       - "${CLICKHOUSE_HTTP_PORT:-8123}:8123"
     environment:
       CLICKHOUSE_DB: ${CLICKHOUSE_DB:-default}
+      CLICKHOUSE_PASSWORD: ${CLICKHOUSE_PASSWORD:-clickhouse}
     healthcheck:
-      test: ["CMD-SHELL", "clickhouse-client --query 'SELECT 1'"]
+      test: ["CMD-SHELL", "clickhouse-client --user default --password \"$${CLICKHOUSE_PASSWORD}\" --query 'SELECT 1'"]
       interval: 10s
       timeout: 5s
       retries: 10
@@ -31,7 +32,7 @@ services:
       CLICKHOUSE_MCP_PUBLIC_BASE_URL: ${CLICKHOUSE_MCP_PUBLIC_BASE_URL:-http://localhost:${PORT:-8082}}
       CLICKHOUSE_MCP_URL: ${CLICKHOUSE_MCP_URL:-clickhouse:9000/default}
       CLICKHOUSE_MCP_USER: ${CLICKHOUSE_MCP_USER:-default}
-      CLICKHOUSE_MCP_PASSWORD: ${CLICKHOUSE_MCP_PASSWORD:-}
+      CLICKHOUSE_MCP_PASSWORD: ${CLICKHOUSE_MCP_PASSWORD:-clickhouse}
       CLICKHOUSE_MCP_DB: ${CLICKHOUSE_MCP_DB:-default}
       CLICKHOUSE_MCP_SECURE: ${CLICKHOUSE_MCP_SECURE:-false}
       CLICKHOUSE_MCP_INSECURE_SKIP_VERIFY: ${CLICKHOUSE_MCP_INSECURE_SKIP_VERIFY:-false}

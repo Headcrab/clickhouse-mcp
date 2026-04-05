@@ -28,10 +28,11 @@ jobs:
           docker run -d --name clickhouse-test \
             -p 9000:9000 \
             -p 8123:8123 \
+            -e CLICKHOUSE_PASSWORD=clickhouse \
             clickhouse/clickhouse-server:24.3
 
           for i in $(seq 1 30); do
-            if docker exec clickhouse-test clickhouse-client --query "SELECT 1" >/dev/null 2>&1; then
+            if docker exec clickhouse-test clickhouse-client --user default --password clickhouse --query "SELECT 1" >/dev/null 2>&1; then
               exit 0
             fi
             sleep 2
@@ -48,7 +49,7 @@ jobs:
           CLICKHOUSE_MCP_INTEGRATION: "1"
           CLICKHOUSE_MCP_TEST_URL: "localhost:9000/default"
           CLICKHOUSE_MCP_TEST_USER: "default"
-          CLICKHOUSE_MCP_TEST_PASSWORD: ""
+          CLICKHOUSE_MCP_TEST_PASSWORD: "clickhouse"
           CLICKHOUSE_MCP_TEST_SECURE: "false"
         run: go test -v ./...
 
