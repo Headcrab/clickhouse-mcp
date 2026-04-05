@@ -8,6 +8,9 @@ on:
 
 env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
+  CLICKHOUSE_TEST_USER: "mcp"
+  CLICKHOUSE_TEST_PASSWORD: "clickhouse"
+  CLICKHOUSE_TEST_DB: "default"
 
 jobs:
   build-test:
@@ -28,11 +31,14 @@ jobs:
           docker run -d --name clickhouse-test \
             -p 9000:9000 \
             -p 8123:8123 \
-            -e CLICKHOUSE_PASSWORD=clickhouse \
+            -e CLICKHOUSE_USER=${CLICKHOUSE_TEST_USER} \
+            -e CLICKHOUSE_PASSWORD=${CLICKHOUSE_TEST_PASSWORD} \
+            -e CLICKHOUSE_DB=${CLICKHOUSE_TEST_DB} \
+            -e CLICKHOUSE_DEFAULT_ACCESS_MANAGEMENT=1 \
             clickhouse/clickhouse-server:24.3
 
           for i in $(seq 1 30); do
-            if docker exec clickhouse-test clickhouse-client --user default --password clickhouse --query "SELECT 1" >/dev/null 2>&1; then
+            if curl --fail --silent --show-error "http://127.0.0.1:8123/?user=${CLICKHOUSE_TEST_USER}&password=${CLICKHOUSE_TEST_PASSWORD}&query=SELECT%201" >/dev/null; then
               exit 0
             fi
             sleep 2
@@ -47,9 +53,9 @@ jobs:
       - name: Test
         env:
           CLICKHOUSE_MCP_INTEGRATION: "1"
-          CLICKHOUSE_MCP_TEST_URL: "localhost:9000/default"
-          CLICKHOUSE_MCP_TEST_USER: "default"
-          CLICKHOUSE_MCP_TEST_PASSWORD: "clickhouse"
+          CLICKHOUSE_MCP_TEST_URL: "localhost:9000/${{ env.CLICKHOUSE_TEST_DB }}"
+          CLICKHOUSE_MCP_TEST_USER: "${{ env.CLICKHOUSE_TEST_USER }}"
+          CLICKHOUSE_MCP_TEST_PASSWORD: "${{ env.CLICKHOUSE_TEST_PASSWORD }}"
           CLICKHOUSE_MCP_TEST_SECURE: "false"
         run: go test -v ./...
 
