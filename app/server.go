@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
-	"os"
 
 	"clickhouse-mcp/clickhouse"
 	"clickhouse-mcp/mcp"
@@ -16,6 +15,7 @@ import (
 
 // Server инкапсулирует логику запуска и настройки MCP сервера
 type Server struct {
+	logger     *slog.Logger
 	config     ServerConfig
 	mcpServer  *server.MCPServer
 	tools      mcp.ToolHandler
@@ -25,17 +25,13 @@ type Server struct {
 
 // NewServer создает новый экземпляр сервера
 func NewServer(config ServerConfig) (*Server, error) {
-	// Настраиваем логгер
-	slog.SetDefault(slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{
-		Level: slog.LevelInfo,
-	})))
-
 	if err := config.Validate(); err != nil {
 		return nil, fmt.Errorf("ошибка конфигурации: %w", err)
 	}
 
 	// Создаем сервер
 	server := &Server{
+		logger: slog.Default().With("module", "app"),
 		config: config,
 	}
 
@@ -65,11 +61,11 @@ func NewServer(config ServerConfig) (*Server, error) {
 
 // connectToClickhouse устанавливает соединение с ClickHouse
 func (s *Server) connectToClickhouse() error {
-	slog.Info("Подключение к ClickHouse",
-		"host", s.config.ClickhouseHost,
-		"port", s.config.ClickhousePort,
-		"database", s.config.Database,
-		"secure", s.config.Secure,
+	s.logger.Info("connecting to clickhouse",
+		slog.String("host", s.config.ClickhouseHost),
+		slog.Int("port", s.config.ClickhousePort),
+		slog.String("database", s.config.Database),
+		slog.Bool("secure", s.config.Secure),
 	)
 
 	client, err := clickhouse.NewClient(s.config.ClickHouseConfig())
@@ -92,7 +88,7 @@ func (s *Server) createMCPServer() *server.MCPServer {
 
 // RunTests запускает тестовые примеры
 func (s *Server) RunTests() {
-	slog.Info("Запуск тестовых примеров")
+	s.logger.Info("running test examples")
 
 	fmt.Println("=== Пример запроса для получения списка баз данных ===")
 	fmt.Println(`{"jsonrpc":"2.0","id":"test","method":"tools/call","params":{"name":"get_databases","arguments":{}}}`)
@@ -133,21 +129,21 @@ func (s *Server) Start() error {
 		}
 
 		if s.config.PublicBaseURL == "" {
-			slog.Warn("public-base-url не задан: advertised SSE endpoint подходит только для локального доступа",
-				"base_url", baseURL,
+			s.logger.Warn("public-base-url is not set; advertised sse endpoint is only suitable for local access",
+				slog.String("base_url", baseURL),
 			)
 		}
 
-		slog.Info("SSE сервер запущен",
-			"listen_address", addr,
-			"base_url", baseURL,
-			"healthcheck", fmt.Sprintf("http://127.0.0.1:%d/healthz", s.config.Port),
+		s.logger.Info("sse server started",
+			slog.String("listen_address", addr),
+			slog.String("base_url", baseURL),
+			slog.String("healthcheck", fmt.Sprintf("http://127.0.0.1:%d/healthz", s.config.Port)),
 		)
 		if err := s.httpServer.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
 			return fmt.Errorf("ошибка запуска SSE сервера: %w", err)
 		}
 	} else {
-		slog.Info("Запуск ClickHouse MCP сервера через stdio")
+		s.logger.Info("starting clickhouse mcp server over stdio")
 		if err := server.ServeStdio(s.mcpServer); err != nil {
 			return fmt.Errorf("ошибка запуска stdio сервера: %w", err)
 		}

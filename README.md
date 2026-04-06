@@ -254,6 +254,15 @@ http://localhost:8082/healthz
 
 ## Разработка
 
+Для локальной работы есть `Taskfile.yml`:
+
+```bash
+task build
+task test
+task check
+task run
+```
+
 ```bash
 go vet ./...
 go test ./...

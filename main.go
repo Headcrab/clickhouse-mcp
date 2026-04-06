@@ -52,6 +52,7 @@ func main() {
 	slog.SetDefault(slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{
 		Level: slog.LevelInfo,
 	})))
+	logger := slog.Default().With("module", "main")
 
 	config, err := app.ResolveConfig(app.ServerInputConfig{
 		Transport:          strings.TrimSpace(transport),
@@ -69,20 +70,20 @@ func main() {
 		MaxQueryLimit:      maxQueryLimit,
 	})
 	if err != nil {
-		slog.Error("Ошибка конфигурации", "err", err)
+		logger.Error("failed to resolve config", slog.Any("err", err))
 		os.Exit(1)
 	}
 
 	// Создаем и запускаем сервер
 	server, err := app.NewServer(config)
 	if err != nil {
-		slog.Error("Ошибка создания сервера", "err", err)
+		logger.Error("failed to create server", slog.Any("err", err))
 		os.Exit(1)
 	}
 	defer server.Close()
 
 	if err := server.Start(); err != nil {
-		slog.Error("Ошибка сервера", "err", err)
+		logger.Error("server exited with error", slog.Any("err", err))
 		os.Exit(1)
 	}
 }
