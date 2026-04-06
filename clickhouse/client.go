@@ -17,6 +17,7 @@ type Client interface {
 	GetTables(ctx context.Context, database string) ([]string, error)
 	GetTableSchema(ctx context.Context, database, table string) ([]ColumnInfo, error)
 	QueryData(ctx context.Context, query string) (QueryResult, error)
+	Execute(ctx context.Context, query string) error
 	GetConnection() driver.Conn
 	Close() error
 }
@@ -309,6 +310,24 @@ func (c *DefaultClient) QueryData(ctx context.Context, query string) (QueryResul
 		Columns: columns,
 		Rows:    results,
 	}, nil
+}
+
+// Execute выполняет SQL без набора строк в ответе.
+func (c *DefaultClient) Execute(ctx context.Context, query string) error {
+	cleanQuery := strings.TrimSpace(query)
+	if cleanQuery == "" {
+		return fmt.Errorf("SQL запрос пустой")
+	}
+
+	if err := c.ensureConnection(ctx); err != nil {
+		return fmt.Errorf("ошибка подключения: %w", err)
+	}
+
+	if err := c.conn.Exec(ctx, cleanQuery); err != nil {
+		return fmt.Errorf("ошибка выполнения запроса: %w", err)
+	}
+
+	return nil
 }
 
 func normalizeScannedValue(col ColumnInfo, value any) any {

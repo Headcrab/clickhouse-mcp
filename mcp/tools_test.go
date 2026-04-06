@@ -41,6 +41,12 @@ func (m *MockClickhouseClient) QueryData(ctx context.Context, query string) (cli
 	return args.Get(0).(clickhouse.QueryResult), args.Error(1)
 }
 
+// Execute - мок метод
+func (m *MockClickhouseClient) Execute(ctx context.Context, query string) error {
+	args := m.Called(ctx, query)
+	return args.Error(0)
+}
+
 // GetConnection - мок метод
 func (m *MockClickhouseClient) GetConnection() driver.Conn {
 	args := m.Called()
@@ -288,4 +294,30 @@ func TestHandleQueryToolRejectsWriteInReadOnlyMode(t *testing.T) {
 	assert.True(t, result.IsError)
 	assert.Contains(t, getText(result), "Ошибка валидации запроса")
 	mockClient.AssertNotCalled(t, "QueryData", mock.Anything, mock.Anything)
+}
+
+func TestHandleQueryToolExecutesWriteInWriteMode(t *testing.T) {
+	mockClient := new(MockClickhouseClient)
+	mockClient.On("Execute", mock.Anything, "INSERT INTO test VALUES (1)").Return(nil)
+
+	handler := NewToolHandler(mockClient, clickhouse.QueryPolicy{
+		AllowWrite:   true,
+		DefaultLimit: 100,
+		MaxLimit:     10000,
+	})
+
+	request := mcp.CallToolRequest{}
+	request.Params.Name = "query"
+	request.Params.Arguments = map[string]interface{}{
+		"query": "INSERT INTO test VALUES (1)",
+	}
+
+	result, err := handler.HandleQueryTool(context.Background(), request)
+
+	assert.NoError(t, err)
+	assert.NotNil(t, result)
+	assert.False(t, result.IsError)
+	assert.Contains(t, getText(result), "Запрос выполнен, результатов нет.")
+	mockClient.AssertNotCalled(t, "QueryData", mock.Anything, mock.Anything)
+	mockClient.AssertExpectations(t)
 }

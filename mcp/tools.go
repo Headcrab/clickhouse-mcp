@@ -155,6 +155,13 @@ func (h *DefaultToolHandler) HandleQueryTool(
 		return mcp.NewToolResultError(fmt.Sprintf("Ошибка валидации запроса: %s", err)), nil
 	}
 
+	if prepared.Kind == clickhouse.QueryKindWrite {
+		if err := h.client.Execute(ctx, prepared.Query); err != nil {
+			return mcp.NewToolResultError(fmt.Sprintf("Ошибка выполнения запроса: %s", err)), nil
+		}
+		return mcp.NewToolResultText("Запрос выполнен, результатов нет."), nil
+	}
+
 	results, err := h.client.QueryData(ctx, prepared.Query)
 	if err != nil {
 		return mcp.NewToolResultError(fmt.Sprintf("Ошибка выполнения запроса: %s", err)), nil
