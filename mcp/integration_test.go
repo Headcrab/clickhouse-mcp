@@ -4,6 +4,8 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
+	"log/slog"
 	"net/url"
 	"os"
 	"strconv"
@@ -46,7 +48,7 @@ func TestIntegrationQueryAndMetadata(t *testing.T) {
 		AllowWrite:   false,
 		DefaultLimit: 1,
 		MaxLimit:     100,
-	})
+	}, slog.New(slog.NewTextHandler(io.Discard, nil)))
 
 	databasesResult, err := readOnlyHandler.HandleGetDatabasesTool(ctx, mcpsdk.CallToolRequest{})
 	if err != nil {
@@ -115,7 +117,7 @@ func TestIntegrationQueryAndMetadata(t *testing.T) {
 		AllowWrite:   true,
 		DefaultLimit: 100,
 		MaxLimit:     100,
-	})
+	}, slog.New(slog.NewTextHandler(io.Discard, nil)))
 	insertAllowed, err := writeHandler.HandleQueryTool(ctx, insertRequest)
 	if err != nil {
 		t.Fatalf("HandleQueryTool() write insert error = %v", err)

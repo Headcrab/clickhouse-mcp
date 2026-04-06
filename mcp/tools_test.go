@@ -2,6 +2,8 @@ package mcp
 
 import (
 	"context"
+	"io"
+	"log/slog"
 	"testing"
 
 	"clickhouse-mcp/clickhouse"
@@ -74,6 +76,10 @@ func getText(result *mcp.CallToolResult) string {
 	return ""
 }
 
+func testLogger() *slog.Logger {
+	return slog.New(slog.NewTextHandler(io.Discard, nil))
+}
+
 func TestHandleGetDatabasesTool(t *testing.T) {
 	// Создаем мок клиента
 	mockClient := new(MockClickhouseClient)
@@ -82,7 +88,7 @@ func TestHandleGetDatabasesTool(t *testing.T) {
 	mockClient.On("GetDatabases", mock.Anything).Return([]string{"db1", "db2", "db3"}, nil)
 
 	// Создаем тестируемый обработчик
-	handler := NewToolHandler(mockClient, clickhouse.QueryPolicy{DefaultLimit: 100, MaxLimit: 10000})
+	handler := NewToolHandler(mockClient, clickhouse.QueryPolicy{DefaultLimit: 100, MaxLimit: 10000}, testLogger())
 
 	// Создаем тестовый запрос
 	request := mcp.CallToolRequest{}
@@ -112,7 +118,7 @@ func TestHandleGetTablesTool(t *testing.T) {
 	mockClient.On("GetTables", mock.Anything, "test_db").Return([]string{"table1", "table2"}, nil)
 
 	// Создаем тестируемый обработчик
-	handler := NewToolHandler(mockClient, clickhouse.QueryPolicy{DefaultLimit: 100, MaxLimit: 10000})
+	handler := NewToolHandler(mockClient, clickhouse.QueryPolicy{DefaultLimit: 100, MaxLimit: 10000}, testLogger())
 
 	// Тест 1: корректный запрос
 	t.Run("Valid Request", func(t *testing.T) {
@@ -168,7 +174,7 @@ func TestHandleGetTableSchemaTool(t *testing.T) {
 	}, nil)
 
 	// Создаем тестируемый обработчик
-	handler := NewToolHandler(mockClient, clickhouse.QueryPolicy{DefaultLimit: 100, MaxLimit: 10000})
+	handler := NewToolHandler(mockClient, clickhouse.QueryPolicy{DefaultLimit: 100, MaxLimit: 10000}, testLogger())
 
 	// Тест 1: корректный запрос
 	t.Run("Valid Request", func(t *testing.T) {
@@ -230,7 +236,7 @@ func TestHandleQueryTool(t *testing.T) {
 	}, nil)
 
 	// Создаем тестируемый обработчик
-	handler := NewToolHandler(mockClient, clickhouse.QueryPolicy{DefaultLimit: 100, MaxLimit: 10000})
+	handler := NewToolHandler(mockClient, clickhouse.QueryPolicy{DefaultLimit: 100, MaxLimit: 10000}, testLogger())
 
 	// Тест 1: корректный запрос с указанным лимитом
 	t.Run("Valid Request With Limit", func(t *testing.T) {
@@ -279,7 +285,7 @@ func TestHandleQueryTool(t *testing.T) {
 
 func TestHandleQueryToolRejectsWriteInReadOnlyMode(t *testing.T) {
 	mockClient := new(MockClickhouseClient)
-	handler := NewToolHandler(mockClient, clickhouse.QueryPolicy{DefaultLimit: 100, MaxLimit: 10000})
+	handler := NewToolHandler(mockClient, clickhouse.QueryPolicy{DefaultLimit: 100, MaxLimit: 10000}, testLogger())
 
 	request := mcp.CallToolRequest{}
 	request.Params.Name = "query"
@@ -304,7 +310,7 @@ func TestHandleQueryToolExecutesWriteInWriteMode(t *testing.T) {
 		AllowWrite:   true,
 		DefaultLimit: 100,
 		MaxLimit:     10000,
-	})
+	}, testLogger())
 
 	request := mcp.CallToolRequest{}
 	request.Params.Name = "query"

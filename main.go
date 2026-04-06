@@ -49,7 +49,7 @@ func main() {
 	flag.Parse()
 
 	// Настраиваем текстовый логгер
-	slog.SetDefault(slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{
+	slog.SetDefault(slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{
 		Level: slog.LevelInfo,
 	})))
 	logger := slog.Default().With("module", "main")

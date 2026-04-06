@@ -48,7 +48,11 @@ func NewServer(config ServerConfig) (*Server, error) {
 	}
 
 	// Создаем обработчик инструментов
-	server.tools = mcp.NewToolHandler(server.chClient, config.QueryPolicy())
+	server.tools = mcp.NewToolHandler(
+		server.chClient,
+		config.QueryPolicy(),
+		slog.Default().With("module", "mcp.tools"),
+	)
 
 	// Создаем MCP сервер
 	server.mcpServer = server.createMCPServer()

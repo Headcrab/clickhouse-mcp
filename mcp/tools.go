@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"strings"
 
 	"clickhouse-mcp/clickhouse"
@@ -29,13 +30,19 @@ type ToolHandler interface {
 
 // DefaultToolHandler - стандартная реализация обработчика инструментов
 type DefaultToolHandler struct {
+	logger *slog.Logger
 	client clickhouse.Client
 	policy clickhouse.QueryPolicy
 }
 
 // NewToolHandler создает новый экземпляр обработчика инструментов
-func NewToolHandler(client clickhouse.Client, policy clickhouse.QueryPolicy) ToolHandler {
+func NewToolHandler(client clickhouse.Client, policy clickhouse.QueryPolicy, logger *slog.Logger) ToolHandler {
+	if logger == nil {
+		logger = slog.Default().With("module", "mcp.tools")
+	}
+
 	return &DefaultToolHandler{
+		logger: logger,
 		client: client,
 		policy: policy,
 	}
@@ -48,6 +55,7 @@ func (h *DefaultToolHandler) HandleGetDatabasesTool(
 ) (*mcp.CallToolResult, error) {
 	databases, err := h.client.GetDatabases(ctx)
 	if err != nil {
+		h.logger.Error("failed to list databases", slog.Any("err", err))
 		return mcp.NewToolResultError(fmt.Sprintf("Ошибка получения баз данных: %s", err)), nil
 	}
 
@@ -61,6 +69,8 @@ func (h *DefaultToolHandler) HandleGetDatabasesTool(
 		result += fmt.Sprintf("%d. %s\n", i+1, db)
 	}
 
+	h.logger.Info("listed databases", slog.Int("database_count", len(databases)))
+
 	// Возвращаем результат
 	return mcp.NewToolResultText(result), nil
 }
@@ -73,11 +83,16 @@ func (h *DefaultToolHandler) HandleGetTablesTool(
 	arguments := request.Params.Arguments
 	database, ok := arguments["database"].(string)
 	if !ok {
+		h.logger.Warn("get_tables rejected", slog.String("reason", "missing_database"))
 		return mcp.NewToolResultError("Необходимо указать параметр 'database'"), nil
 	}
 
 	tables, err := h.client.GetTables(ctx, database)
 	if err != nil {
+		h.logger.Error("failed to list tables",
+			slog.String("database", database),
+			slog.Any("err", err),
+		)
 		return mcp.NewToolResultError(fmt.Sprintf("Ошибка получения таблиц: %s", err)), nil
 	}
 
@@ -90,6 +105,11 @@ func (h *DefaultToolHandler) HandleGetTablesTool(
 			result += fmt.Sprintf("%d. %s\n", i+1, table)
 		}
 	}
+
+	h.logger.Info("listed tables",
+		slog.String("database", database),
+		slog.Int("table_count", len(tables)),
+	)
 
 	// Возвращаем результат
 	return mcp.NewToolResultText(result), nil
@@ -105,11 +125,20 @@ func (h *DefaultToolHandler) HandleGetTableSchemaTool(
 	table, ok2 := arguments["table"].(string)
 
 	if !ok1 || !ok2 {
+		h.logger.Warn("get_schema rejected",
+			slog.Bool("has_database", ok1),
+			slog.Bool("has_table", ok2),
+		)
 		return mcp.NewToolResultError("Необходимо указать параметры 'database' и 'table'"), nil
 	}
 
 	columns, err := h.client.GetTableSchema(ctx, database, table)
 	if err != nil {
+		h.logger.Error("failed to describe table",
+			slog.String("database", database),
+			slog.String("table", table),
+			slog.Any("err", err),
+		)
 		return mcp.NewToolResultError(fmt.Sprintf("Ошибка получения схемы таблицы: %s", err)), nil
 	}
 
@@ -125,6 +154,12 @@ func (h *DefaultToolHandler) HandleGetTableSchemaTool(
 		}
 	}
 
+	h.logger.Info("described table",
+		slog.String("database", database),
+		slog.String("table", table),
+		slog.Int("column_count", len(columns)),
+	)
+
 	// Возвращаем результат
 	return mcp.NewToolResultText(result), nil
 }
@@ -139,6 +174,7 @@ func (h *DefaultToolHandler) HandleQueryTool(
 	limit := 100 // Значение по умолчанию
 
 	if !ok1 {
+		h.logger.Warn("query rejected", slog.String("reason", "missing_query"))
 		return mcp.NewToolResultError("Необходимо указать параметр 'query'"), nil
 	}
 
@@ -152,34 +188,86 @@ func (h *DefaultToolHandler) HandleQueryTool(
 
 	prepared, err := clickhouse.PrepareQuery(query, limit, h.policy)
 	if err != nil {
+		h.logger.Warn("query rejected",
+			slog.String("query_preview", previewQuery(query)),
+			slog.Int("requested_limit", limit),
+			slog.Bool("allow_write", h.policy.AllowWrite),
+			slog.Any("err", err),
+		)
 		return mcp.NewToolResultError(fmt.Sprintf("Ошибка валидации запроса: %s", err)), nil
 	}
 
 	if prepared.Kind == clickhouse.QueryKindWrite {
 		if err := h.client.Execute(ctx, prepared.Query); err != nil {
+			h.logger.Error("failed to execute write query",
+				slog.String("query_kind", string(prepared.Kind)),
+				slog.String("query_preview", previewQuery(prepared.Query)),
+				slog.Any("err", err),
+			)
 			return mcp.NewToolResultError(fmt.Sprintf("Ошибка выполнения запроса: %s", err)), nil
 		}
+
+		h.logger.Warn("write query executed",
+			slog.String("query_kind", string(prepared.Kind)),
+			slog.String("query_preview", previewQuery(prepared.Query)),
+		)
 		return mcp.NewToolResultText("Запрос выполнен, результатов нет."), nil
 	}
 
 	results, err := h.client.QueryData(ctx, prepared.Query)
 	if err != nil {
+		h.logger.Error("failed to execute read query",
+			slog.String("query_kind", string(prepared.Kind)),
+			slog.String("query_preview", previewQuery(prepared.Query)),
+			slog.Int("effective_limit", prepared.EffectiveLimit),
+			slog.Any("err", err),
+		)
 		return mcp.NewToolResultError(fmt.Sprintf("Ошибка выполнения запроса: %s", err)), nil
 	}
 
 	// Прекращаем дальнейшую обработку, если нет колонок
 	if len(results.Columns) == 0 {
+		h.logger.Info("query executed",
+			slog.String("query_kind", string(prepared.Kind)),
+			slog.String("query_preview", previewQuery(prepared.Query)),
+			slog.Int("effective_limit", prepared.EffectiveLimit),
+			slog.Bool("limit_applied", prepared.LimitApplied),
+			slog.Int("row_count", 0),
+		)
 		return mcp.NewToolResultText("Запрос выполнен, результатов нет."), nil
 	}
 
 	// Преобразуем результаты для JSON
 	jsonBytes, err := json.MarshalIndent(results, "", "  ")
 	if err != nil {
+		h.logger.Error("failed to format query result",
+			slog.String("query_kind", string(prepared.Kind)),
+			slog.String("query_preview", previewQuery(prepared.Query)),
+			slog.Any("err", err),
+		)
 		return mcp.NewToolResultError(fmt.Sprintf("Ошибка форматирования результатов: %s", err)), nil
 	}
 
+	h.logger.Info("query executed",
+		slog.String("query_kind", string(prepared.Kind)),
+		slog.String("query_preview", previewQuery(prepared.Query)),
+		slog.Int("effective_limit", prepared.EffectiveLimit),
+		slog.Bool("limit_applied", prepared.LimitApplied),
+		slog.Int("row_count", len(results.Rows)),
+		slog.Int("column_count", len(results.Columns)),
+	)
+
 	// Возвращаем результат в текстовом виде (поскольку mcp-go не имеет метода NewToolResultJSON)
 	return mcp.NewToolResultText(string(jsonBytes)), nil
+}
+
+func previewQuery(query string) string {
+	normalized := strings.Join(strings.Fields(strings.TrimSpace(query)), " ")
+	if len(normalized) <= 160 {
+		return normalized
+	}
+
+	return normalized[:157] + "..."
 }
 
 // RegisterTools регистрирует инструменты MCP
